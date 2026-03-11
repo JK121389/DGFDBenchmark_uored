@@ -24,8 +24,8 @@ manifest_path: /root/py/multidiag_remote/multidiag/data/manifest.csv
 split_path: /root/py/multidiag_remote/multidiag/data/splits/group_split_v1.json
 data_root: /root/py/multidiag_remote/multidiag
 modality: vib
-num_workers: 4
-pin_memory: true
+num_workers: 0
+pin_memory: false
 enforce_disjoint_source_target: true
 
 # input length
