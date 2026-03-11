@@ -20,9 +20,9 @@ num_classes: 5
 
 # UORED bridge
 use_uored_bridge: true
-manifest_path: /ABS/PATH/TO/data/manifest.csv
-split_path: /ABS/PATH/TO/data/group_split_v1.json
-data_root: /ABS/PATH/TO/project_root
+manifest_path: /root/py/multidiag_remote/multidiag/data/manifest.csv
+split_path: /root/py/multidiag_remote/multidiag/data/splits/group_split_v1.json
+data_root: /root/py/multidiag_remote/multidiag
 modality: vib
 num_workers: 4
 pin_memory: true
