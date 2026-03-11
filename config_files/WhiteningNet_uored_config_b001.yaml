@@ -1,4 +1,4 @@
-reference: WhiteningNet: a causal framework for cross-domain fault diagnosis under different working conditions
+reference: "WhiteningNet: a causal framework for cross-domain fault diagnosis under different working conditions"
 
 dataset_type: uored
 fan_section: sec00
