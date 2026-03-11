@@ -11,3 +11,6 @@ The dataset used in this paper can be downloaded from https://drive.google.com/f
 
 If you have any issue or question, please contact me directly! [linshan.jia@my.cityu.edu.hk]
 
+因为毕设需要验证问题是否单一存在，需要将DG的模型进行一定修改：
+1）数据库接入
+2）输出指标统一，用于评价脚本
