@@ -47,3 +47,5 @@ target_conditions:
 run_id: cnnc_uored_a001
 output_root: Output/CNNC_UORED
 export_test_preds: true
+
+export_docx_report: false

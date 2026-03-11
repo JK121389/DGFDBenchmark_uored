@@ -19,7 +19,7 @@ ReadMIMII = None
 from utils.CalIndex import cal_index
 from utils.CreateLogger import create_logger
 from utils.DictObj import DictObj
-from utils.TuneReport import GenReport
+GenReport = None
 
 from datasets.uored_condition_bridge import build_uored_condition_loaders
 from utils.preds_export import collect_batch_meta, write_lightweight_preds_csv
@@ -296,9 +296,14 @@ def main():
     loss_acc_result['acces'] = np.array(loss_acc_result['acces'])
 
     sio.savemat(os.path.join(full_path_log, 'loss_acc_result' + currtime + '.mat'), loss_acc_result)
-    gen_report = GenReport(full_path_rep)
-    gen_report.write_file(configs=configs, test_item=None, loss_acc_result=loss_acc_result)
-    gen_report.save_file(currtime)
+
+    if bool(getattr(configs, 'export_docx_report', False)):
+        global GenReport
+        if GenReport is None:
+            from utils.TuneReport import GenReport
+        gen_report = GenReport(full_path_rep)
+        gen_report.write_file(configs=configs, test_item=None, loss_acc_result=loss_acc_result)
+        gen_report.save_file(currtime)
 
     if bool(getattr(configs, 'export_test_preds', True)):
         target_pred_paths = [os.path.join(pred_dir, f'test_preds__{name}.csv') for name in target_names]
