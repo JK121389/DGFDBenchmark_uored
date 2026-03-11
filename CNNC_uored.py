@@ -142,8 +142,7 @@ class CNNC(nn.Module):
 
             loss_acc_result['loss_cl'].append(losses['cl'])
             loss_acc_result['loss_proto'].append(losses['proto'])
-            self.logger.info('loss_cl_train: \t {loss_cl: .4f} \t loss_proto_train: \t {loss_proto: .4f} '.format(**losses))
-
+            self.logger.info('loss_cl_train: \t {cl: .4f} \t loss_proto_train: \t {proto: .4f} '.format(**losses))
             if step % self.checkpoint_freq == 0 or step == self.steps:
                 acc_results = self.test_model(test_loaders)
                 loss_acc_result['acces'].append(acc_results)
