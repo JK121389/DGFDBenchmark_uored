@@ -45,7 +45,7 @@ class UoredVafclsDataset(Dataset):
         self.manifest_path = Path(manifest_path)
         self.split_path = Path(split_path)
         self.split = split
-        self.root = Path(root) if root is not None else Path('.')
+        self.root = Path(root) if root is not None else Path('../utils')
         self.cache_mat = cache_mat
         if split not in ('train', 'val', 'test'):
             raise ValueError(f"split must be one of train/val/test, got: {split}")
