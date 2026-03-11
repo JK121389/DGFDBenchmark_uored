@@ -1,0 +1,99 @@
+reference: Learn Generalization Feature via Convolutional Neural Network_ A Fault Diagnosis Scheme Toward Unseen Operating Conditions
+
+dataset_type: uored
+fan_section: sec00
+
+device: 'cpu'
+use_cuda: true
+
+# original-style model/training params
+batch_size: 64
+steps: 200
+checkpoint_freq: 10
+lr: 0.0001
+lr_cent: 0.5
+use_learning_rate_sheduler: true
+cos: false
+schedule: [100, 150]
+lbda_proto: 1.0
+num_classes: 5
+
+# UORED bridge
+use_uored_bridge: true
+manifest_path: /root/py/multidiag_remote/multidiag/data/manifest.csv
+split_path: /root/py/multidiag_remote/multidiag/data/splits/group_split_v1.json
+data_root: /root/py/multidiag_remote/multidiag
+modality: vib
+num_workers: 4
+pin_memory: true
+enforce_disjoint_source_target: true
+
+# input length
+data_length: 1024
+infer_dim_feature_from_input: false
+
+# output
+run_id: cnnc_uored_b001_allsrc_alltgt
+output_root: Output/CNNC_UORED
+export_test_preds: true
+export_docx_report: false
+
+# B1: all train conditions as source domains
+source_conditions:
+  - S1709_L0_T12
+  - S1709_L400_T4
+  - S1720_L0_T16
+  - S1720_L0_T18
+  - S1720_L0_T34
+  - S1720_L400_T4
+  - S1720_L400_T8
+  - S1722_L0_T29
+  - S1725_L0_T12
+  - S1730_L400_T38
+  - S1738_L0_T21
+  - S1738_L0_T29
+  - S1738_L400_T2
+  - S1738_L400_T4
+  - S1742_L0_T26
+  - S1742_L0_T32
+  - S1742_L400_T4
+  - S1748_L0_T17
+  - S1751_L0_T13
+  - S1751_L400_T4
+  - S1755_L0_T10
+  - S1755_L0_T30
+  - S1755_L400_T4
+  - S1758_L0_T14
+  - S1758_L0_T18
+  - S1758_L400_T4
+  - S1760_L400_T4
+  - S1765_L0_T22
+  - S1765_L0_T30
+  - S1765_L400_T8
+  - S1770_L0_T15
+  - S1770_L400_T4
+  - S1774_L0_T17
+  - S1774_L0_T29
+  - S1774_L400_T4
+  - S1780_L0_T13
+  - S1780_L0_T29
+  - S1780_L400_T4
+  - S1785_L0_T18
+  - S1785_L0_T28
+  - S1785_L400_T4
+  - S1790_L0_T17
+  - S1790_L0_T25
+  - S1790_L400_T4
+  - S1796_L0_T18
+  - S1796_L0_T28
+  - S1799_L0_T18
+  - S1800_L400_T1
+
+# B1: all unseen test conditions as targets
+target_conditions:
+  - S1709_L0_T29
+  - S1725_L400_T6
+  - S1785_L400_T16
+  - S1796_L400_T4
+  - S1799_L400_T16
+  - S1948_L400_T11
