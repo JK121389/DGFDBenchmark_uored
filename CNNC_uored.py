@@ -11,8 +11,11 @@ import torch.nn as nn
 import yaml
 
 from models.Networks import Network_bearing, Network_fan
-from datasets.load_bearing_data import ReadDZLRSB, ReadMFPT, ReadUOTTAWA  # kept for original mode compatibility
-from datasets.load_fan_data import ReadMIMII
+# lazy imports for original benchmark compatibility
+ReadDZLRSB = None
+ReadMFPT = None
+ReadUOTTAWA = None
+ReadMIMII = None
 from utils.CalIndex import cal_index
 from utils.CreateLogger import create_logger
 from utils.DictObj import DictObj
@@ -206,6 +209,7 @@ class CNNC(nn.Module):
 
 
 def build_loaders_for_configs(configs):
+    global ReadDZLRSB, ReadMFPT, ReadUOTTAWA, ReadMIMII
     if bool(getattr(configs, 'use_uored_bridge', False)):
         train_loaders_src, test_loaders_tgt, test_loaders_src, target_names, source_names = build_uored_condition_loaders(configs)
         configs.datasets_tgt = target_names
@@ -213,8 +217,13 @@ def build_loaders_for_configs(configs):
         return train_loaders_src, test_loaders_tgt, test_loaders_src, target_names, source_names
 
     if configs.dataset_type == 'bearing':
+        if ReadDZLRSB is None or ReadMFPT is None or ReadUOTTAWA is None:
+            from datasets.load_bearing_data import ReadDZLRSB, ReadMFPT, ReadUOTTAWA
         datasets_list = ['CWRU', 'UOTTAWA', 'MFPT', 'DZLRSB']
+
     elif configs.dataset_type == 'fan':
+        if ReadMIMII is None:
+            from datasets.load_fan_data import ReadMIMII
         configs.num_classes = 2
         configs.batch_size = 32
         configs.steps = 100
