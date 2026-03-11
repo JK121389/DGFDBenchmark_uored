@@ -33,7 +33,7 @@ enforce_disjoint_source_target: true
 # the script will infer dim_feature automatically from a dummy forward pass
 # so you do not need to hand-compute it.
 data_length: 1024
-infer_dim_feature_from_input: true
+infer_dim_feature_from_input: false
 
 # A plan: start with a few train conditions and one unseen target condition
 source_conditions:
