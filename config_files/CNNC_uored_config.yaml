@@ -1,0 +1,49 @@
+reference: Learn Generalization Feature via Convolutional Neural Network_ A Fault Diagnosis Scheme Toward Unseen Operating Conditions
+
+dataset_type: uored
+fan_section: sec00
+
+device: 'cpu'
+use_cuda: true
+
+# original-style model/training params
+batch_size: 64
+steps: 200
+checkpoint_freq: 10
+lr: 0.0001
+lr_cent: 0.5
+use_learning_rate_sheduler: true
+cos: false
+schedule: [100, 150]
+lbda_proto: 1.0
+num_classes: 5
+
+# UORED bridge
+use_uored_bridge: true
+manifest_path: /ABS/PATH/TO/data/manifest.csv
+split_path: /ABS/PATH/TO/data/group_split_v1.json
+data_root: /ABS/PATH/TO/project_root
+modality: vib
+num_workers: 4
+pin_memory: true
+enforce_disjoint_source_target: true
+
+# input length from manifest_stats.json
+# keep this synced to your window length
+# the script will infer dim_feature automatically from a dummy forward pass
+# so you do not need to hand-compute it.
+data_length: 1024
+infer_dim_feature_from_input: true
+
+# A plan: start with a few train conditions and one unseen target condition
+source_conditions:
+  - S1709_L0_T12
+  - S1720_L0_T18
+  - S1725_L0_T12
+
+target_conditions:
+  - S1725_L400_T6
+
+run_id: cnnc_uored_a001
+output_root: Output/CNNC_UORED
+export_test_preds: true
