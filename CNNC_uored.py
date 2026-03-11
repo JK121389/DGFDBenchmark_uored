@@ -82,11 +82,10 @@ class CNNC(nn.Module):
         else:
             raise ValueError('The dataset_type should be bearing, uored or fan!')
 
-        if bool(getattr(configs, 'infer_dim_feature_from_input', False)):
-            with torch.no_grad():
-                dummy = torch.zeros(1, 1, int(configs.data_length), device=self.device)
-                feat, _ = self.model(dummy)
-                configs.dim_feature = int(feat.shape[1])
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, int(configs.data_length), device=self.device)
+            feat, _ = self.model(dummy)
+            configs.dim_feature = int(feat.shape[1])
 
         self.center_loss = CenterLoss(configs).to(self.device)
         self.optimizer = torch.optim.Adam(list(self.model.parameters()), lr=self.lr)
