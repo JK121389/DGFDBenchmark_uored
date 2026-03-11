@@ -31,10 +31,20 @@ class Network_bearing(nn.Module):
         self.pool5 = nn.MaxPool1d(2)
 
         self.flatten = nn.Flatten()
-        self.linear1 = nn.Linear(in_features=1984, out_features=300)
-        self.lrelu1  = nn.LeakyReLU()
-        self.linear2 = nn.Linear(in_features=300, out_features=self.num_classes)
 
+        # infer flattened dim from configs.data_length
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, int(configs.data_length))
+            z = self.pool1(self.conv1(dummy))
+            z = self.pool2(self.conv2(z))
+            z = self.pool3(self.conv3(z))
+            z = self.pool4(self.conv4(z))
+            z = self.pool5(self.conv5(z))
+            feat_dim = self.flatten(z).shape[1]
+
+        self.linear1 = nn.Linear(in_features=feat_dim, out_features=300)
+        self.lrelu1 = nn.LeakyReLU()
+        self.linear2 = nn.Linear(in_features=300, out_features=self.num_classes)
     def forward(self, x):
         x1 = self.pool1(self.conv1(x ))
         x2 = self.pool2(self.conv2(x1))
