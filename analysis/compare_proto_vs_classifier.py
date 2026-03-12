@@ -34,7 +34,7 @@ B. WhiteningNet
 说明：
 - train prototype 统一由 train_embeddings 按类均值构造
 - classifier prediction 优先从 test_embeddings.npz 中读取 y_pred
-- 若缺 y_pred，会直接报错，不做猜测
+- 若缺 y_pred，但存在 logits，则自动用 argmax(logits) 计算 classifier prediction
 """
 
 import argparse
@@ -97,6 +97,13 @@ def build_class_prototypes(features: np.ndarray, labels: np.ndarray) -> Tuple[np
     return class_ids, protos
 
 
+def infer_y_pred_from_logits(logits: np.ndarray) -> np.ndarray:
+    logits = np.asarray(logits)
+    if logits.ndim != 2:
+        raise ValueError(f"logits 维度应为 [N, C]，当前为 {logits.shape}")
+    return np.argmax(logits, axis=1).astype(int)
+
+
 # =========================
 # 通用 embeddings 读取
 # =========================
@@ -108,12 +115,14 @@ def load_method_npz(npz_path: Path, method_name: str):
         feat_key = find_first_key(d, ["z", "features"])
         y_true_key = find_first_key(d, ["y", "y_true", "label"])
         y_pred_key = find_first_key(d, ["y_pred", "pred", "prediction"])
+        logits_key = find_first_key(d, ["logits"])
         cond_key = find_first_key(d, ["condition_id", "condition", "cond"])
         sample_id_key = find_first_key(d, ["sample_id"])
     elif method_name == "WhiteningNet":
         feat_key = find_first_key(d, ["features", "z"])
         y_true_key = find_first_key(d, ["y_true", "y", "label"])
         y_pred_key = find_first_key(d, ["y_pred", "pred", "prediction"])
+        logits_key = find_first_key(d, ["logits"])
         cond_key = find_first_key(d, ["condition_id", "condition", "cond", "loader_name"])
         sample_id_key = find_first_key(d, ["sample_id"])
     else:
@@ -123,15 +132,19 @@ def load_method_npz(npz_path: Path, method_name: str):
         raise ValueError(f"[{method_name}] 未找到 feature 字段。现有字段：{list(d.keys())}")
     if y_true_key is None:
         raise ValueError(f"[{method_name}] 未找到 y_true 字段。现有字段：{list(d.keys())}")
-    if y_pred_key is None:
-        raise ValueError(
-            f"[{method_name}] 未找到 y_pred 字段。现有字段：{list(d.keys())}\n"
-            f"请先确认 test_embeddings.npz 中是否保存了 classifier 预测结果。"
-        )
 
     features = np.asarray(d[feat_key])
     y_true = normalize_int_array(d[y_true_key])
-    y_pred = normalize_int_array(d[y_pred_key])
+
+    # classifier prediction：优先读 y_pred；没有就从 logits 推
+    if y_pred_key is not None:
+        y_pred = normalize_int_array(d[y_pred_key])
+    else:
+        if logits_key is None:
+            raise ValueError(
+                f"[{method_name}] 未找到 y_pred，也未找到 logits。现有字段：{list(d.keys())}"
+            )
+        y_pred = infer_y_pred_from_logits(np.asarray(d[logits_key]))
 
     if cond_key is not None:
         condition_id = normalize_str_array(d[cond_key])
@@ -213,11 +226,6 @@ def summarize_condition(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_major_modes(df_samples: pd.DataFrame, df_summary: pd.DataFrame) -> pd.DataFrame:
-    """
-    补充每个 method x condition 的：
-    - major_proto_error_path
-    - major_clf_error_path
-    """
     extra_rows = []
 
     for _, row in df_summary.iterrows():
