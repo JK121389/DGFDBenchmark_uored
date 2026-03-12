@@ -35,7 +35,41 @@ def load_configs(config_path: str):
     configs = DictObj(cfg)
     if configs.use_cuda and torch.cuda.is_available():
         configs.device = "cuda"
+    else:
+        configs.device = "cpu"
     return configs
+
+
+def _safe_to_numpy(x):
+    if x is None:
+        return None
+    if isinstance(x, np.ndarray):
+        return x
+    if torch.is_tensor(x):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+def _save_embedding_npz(save_path, payload: dict):
+    """
+    统一保存 npz，字符串字段转 object array，数值字段转 numpy array。
+    """
+    save_dict = {}
+    for k, v in payload.items():
+        if v is None:
+            continue
+        if isinstance(v, list):
+            if len(v) == 0:
+                save_dict[k] = np.array([], dtype=object)
+            else:
+                # 纯字符串/混合元信息统一用 object，更稳
+                if isinstance(v[0], str) or v[0] is None:
+                    save_dict[k] = np.array(v, dtype=object)
+                else:
+                    save_dict[k] = np.asarray(v)
+        else:
+            save_dict[k] = _safe_to_numpy(v)
+    np.savez_compressed(save_path, **save_dict)
 
 
 class CausalLoss(nn.Module):
@@ -181,17 +215,56 @@ class WhitenNet(nn.Module):
 
         return loss_acc_result
 
-    def test_model(self, loaders, export_pred_paths=None, loader_names=None, split_name=None):
+    def test_model(
+        self,
+        loaders,
+        export_pred_paths=None,
+        loader_names=None,
+        split_name=None,
+        export_embed_paths=None,
+        export_embed_merged_path=None,
+    ):
+        """
+        保持原有测试/预测逻辑不变，只新增可选 embeddings 导出：
+        - export_embed_paths: 每个 loader 一个 npz
+        - export_embed_merged_path: 所有 loader 合并一个 npz
+        """
         self.eval()
         acc_results = []
 
         export_pred_paths = export_pred_paths or [None] * len(loaders)
+        export_embed_paths = export_embed_paths or [None] * len(loaders)
         loader_names = loader_names or [f"loader_{i}" for i in range(len(loaders))]
+
+        merged_features = []
+        merged_logits = []
+        merged_y_true = []
+        merged_y_pred = []
+        merged_sample_id = []
+        merged_file_id = []
+        merged_condition_id = []
+        merged_loader_name = []
+        merged_method = []
+        merged_run_id = []
+        merged_domain_split = []
 
         for i, the_loader in enumerate(loaders):
             y_pred_lst = []
             y_true_lst = []
             records = []
+
+            # per-loader embeddings cache
+            feat_list = []
+            logits_list = []
+            yt_list = []
+            yp_list = []
+            sample_id_list = []
+            file_id_list = []
+            condition_id_list = []
+            loader_name_list = []
+            method_list = []
+            run_id_list = []
+            domain_split_list = []
 
             for batched_data in the_loader:
                 if isinstance(batched_data, (list, tuple)) and len(batched_data) == 3:
@@ -203,23 +276,40 @@ class WhitenNet(nn.Module):
                 x = x.to(self.device)
                 label_fault = label_fault.to(self.device)
 
-                label_pred = self.predict(x)
+                with torch.no_grad():
+                    feature_vectors, logits = self.model(x)
+                    label_pred = torch.max(logits, dim=1)[1]
+
                 y_pred_np = label_pred.detach().cpu().numpy()
                 y_true_np = label_fault.detach().cpu().numpy()
 
                 y_pred_lst.extend(y_pred_np.tolist())
                 y_true_lst.extend(y_true_np.tolist())
 
+                # embeddings 缓存
+                feat_np = feature_vectors.detach().cpu().numpy()
+                logits_np = logits.detach().cpu().numpy()
+
+                feat_list.append(feat_np)
+                logits_list.append(logits_np)
+                yt_list.extend(y_true_np.tolist())
+                yp_list.extend(y_pred_np.tolist())
+
                 if meta is not None:
                     meta_records = collect_batch_meta(meta)
                     if len(meta_records) != len(y_pred_np):
                         raise RuntimeError(f"Meta batch length mismatch: {len(meta_records)} vs {len(y_pred_np)}")
+
                     for meta_i, yt, yp in zip(meta_records, y_true_np.tolist(), y_pred_np.tolist()):
+                        sample_id = meta_i.get("sample_id")
+                        file_id = meta_i.get("file_id")
+                        condition_id = meta_i.get("condition_id")
+
                         records.append(
                             {
-                                "sample_id": meta_i.get("sample_id"),
-                                "file_id": meta_i.get("file_id"),
-                                "condition_id": meta_i.get("condition_id"),
+                                "sample_id": sample_id,
+                                "file_id": file_id,
+                                "condition_id": condition_id,
                                 "y_true": int(yt),
                                 "y_pred": int(yp),
                                 "method": "WhiteningNet",
@@ -229,12 +319,82 @@ class WhitenNet(nn.Module):
                             }
                         )
 
+                        sample_id_list.append(sample_id)
+                        file_id_list.append(file_id)
+                        condition_id_list.append(condition_id)
+                        loader_name_list.append(loader_names[i])
+                        method_list.append("WhiteningNet")
+                        run_id_list.append(getattr(self.configs, "run_id", ""))
+                        domain_split_list.append(split_name or "")
+                else:
+                    # 没有 meta 时也保证 embeddings 可导出
+                    batch_n = len(y_pred_np)
+                    sample_id_list.extend([None] * batch_n)
+                    file_id_list.extend([None] * batch_n)
+                    condition_id_list.extend([loader_names[i]] * batch_n)
+                    loader_name_list.extend([loader_names[i]] * batch_n)
+                    method_list.extend(["WhiteningNet"] * batch_n)
+                    run_id_list.extend([getattr(self.configs, "run_id", "")] * batch_n)
+                    domain_split_list.extend([split_name or ""] * batch_n)
+
             acc_i, _, _, _ = cal_index(y_true_lst, y_pred_lst)
             acc_results.append(acc_i)
 
             out_csv = export_pred_paths[i] if i < len(export_pred_paths) else None
             if out_csv and records:
                 write_lightweight_preds_csv(records, out_csv)
+
+            # 保存当前 loader 的 embeddings
+            out_embed = export_embed_paths[i] if i < len(export_embed_paths) else None
+            if out_embed is not None:
+                os.makedirs(os.path.dirname(out_embed), exist_ok=True)
+
+                payload = {
+                    "features": np.concatenate(feat_list, axis=0) if len(feat_list) > 0 else np.empty((0, 0), dtype=np.float32),
+                    "logits": np.concatenate(logits_list, axis=0) if len(logits_list) > 0 else np.empty((0, 0), dtype=np.float32),
+                    "y_true": np.asarray(yt_list, dtype=np.int64),
+                    "y_pred": np.asarray(yp_list, dtype=np.int64),
+                    "sample_id": sample_id_list,
+                    "file_id": file_id_list,
+                    "condition_id": condition_id_list,
+                    "loader_name": loader_name_list,
+                    "method": method_list,
+                    "run_id": run_id_list,
+                    "domain_split": domain_split_list,
+                }
+                _save_embedding_npz(out_embed, payload)
+
+            # 汇总到 merged
+            if len(feat_list) > 0:
+                merged_features.append(np.concatenate(feat_list, axis=0))
+                merged_logits.append(np.concatenate(logits_list, axis=0))
+                merged_y_true.extend(yt_list)
+                merged_y_pred.extend(yp_list)
+                merged_sample_id.extend(sample_id_list)
+                merged_file_id.extend(file_id_list)
+                merged_condition_id.extend(condition_id_list)
+                merged_loader_name.extend(loader_name_list)
+                merged_method.extend(method_list)
+                merged_run_id.extend(run_id_list)
+                merged_domain_split.extend(domain_split_list)
+
+        # 保存 merged embeddings
+        if export_embed_merged_path is not None:
+            os.makedirs(os.path.dirname(export_embed_merged_path), exist_ok=True)
+            merged_payload = {
+                "features": np.concatenate(merged_features, axis=0) if len(merged_features) > 0 else np.empty((0, 0), dtype=np.float32),
+                "logits": np.concatenate(merged_logits, axis=0) if len(merged_logits) > 0 else np.empty((0, 0), dtype=np.float32),
+                "y_true": np.asarray(merged_y_true, dtype=np.int64),
+                "y_pred": np.asarray(merged_y_pred, dtype=np.int64),
+                "sample_id": merged_sample_id,
+                "file_id": merged_file_id,
+                "condition_id": merged_condition_id,
+                "loader_name": merged_loader_name,
+                "method": merged_method,
+                "run_id": merged_run_id,
+                "domain_split": merged_domain_split,
+            }
+            _save_embedding_npz(export_embed_merged_path, merged_payload)
 
         self.train()
         return acc_results
@@ -249,14 +409,17 @@ def build_loaders_for_configs(configs):
     global ReadCWRU, ReadDZLRSB, ReadJNU, ReadPU, ReadMFPT, ReadUOTTAWA, ReadMIMII
 
     if bool(getattr(configs, "use_uored_bridge", False)):
-        train_loaders_src, test_loaders_tgt, test_loaders_src, target_names, source_names = build_uored_condition_loaders(
-            configs
-        )
+        train_loaders_src, test_loaders_tgt, test_loaders_src, target_names, source_names = build_uored_condition_loaders(configs)
         configs.datasets_tgt = target_names
         configs.datasets_src = source_names
         return train_loaders_src, test_loaders_tgt, test_loaders_src, target_names, source_names
 
     if configs.dataset_type == "bearing":
+        configs.fan_section = None
+        configs.num_classes = 3
+        configs.batch_size = 64
+        configs.steps = 200
+
         if any(x is None for x in [ReadCWRU, ReadDZLRSB, ReadJNU, ReadPU, ReadMFPT, ReadUOTTAWA]):
             from datasets.load_bearing_data import ReadCWRU, ReadDZLRSB, ReadJNU, ReadPU, ReadMFPT, ReadUOTTAWA
         datasets_list = ["CWRU", "UOTTAWA", "MFPT", "DZLRSB"]
@@ -321,9 +484,15 @@ def main():
     train_loaders_src, test_loaders_tgt, test_loaders_src, target_names, source_names = build_loaders_for_configs(configs)
     train_minibatches_iterator = zip(*train_loaders_src)
 
+    # 仅修改输出目录组织方式，不影响原模型训练/测试逻辑
+    base_run_id = getattr(configs, "run_id", str(time.time())[:10])
+    timestamp_tag = time.strftime("%Y%m%d_%H%M%S")
+    run_id_effective = f"{base_run_id}__embed_{timestamp_tag}"
+    configs.run_id = run_id_effective
+
     run_root = os.path.join(
         getattr(configs, "output_root", "Output/WhiteningNet_UORED"),
-        getattr(configs, "run_id", str(time.time())[:10]),
+        run_id_effective,
     )
     full_path_log = os.path.join(run_root, "log_files")
     full_path_rep = os.path.join(run_root, "TuneReport")
@@ -357,12 +526,29 @@ def main():
 
     if bool(getattr(configs, "export_test_preds", True)):
         target_pred_paths = [os.path.join(pred_dir, f"test_preds__{name}.csv") for name in target_names]
-        model.test_model(
-            test_loaders_tgt,
-            export_pred_paths=target_pred_paths,
-            loader_names=target_names,
-            split_name="target",
-        )
+    else:
+        target_pred_paths = [None] * len(target_names)
+
+    # 新增：target test embeddings 导出
+    export_test_embeddings = bool(getattr(configs, "export_test_embeddings", True))
+    if export_test_embeddings:
+        target_embed_paths = [os.path.join(pred_dir, f"test_embeddings__{name}.npz") for name in target_names]
+        merged_embed_path = os.path.join(pred_dir, "test_embeddings.npz")
+    else:
+        target_embed_paths = [None] * len(target_names)
+        merged_embed_path = None
+
+    model.test_model(
+        test_loaders_tgt,
+        export_pred_paths=target_pred_paths,
+        loader_names=target_names,
+        split_name="target",
+        export_embed_paths=target_embed_paths,
+        export_embed_merged_path=merged_embed_path,
+    )
+
+    logger.info("Run finished.")
+    logger.info(f"Artifacts saved under: {run_root}")
 
 
 if __name__ == "__main__":
