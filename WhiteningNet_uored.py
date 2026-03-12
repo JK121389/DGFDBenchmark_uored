@@ -52,7 +52,9 @@ def _safe_to_numpy(x):
 
 def _save_embedding_npz(save_path, payload: dict):
     """
-    统一保存 npz，字符串字段转 object array，数值字段转 numpy array。
+    统一保存 npz。
+    数值字段转 numpy array；
+    字符串/元信息字段转 object array，兼容性更稳。
     """
     save_dict = {}
     for k, v in payload.items():
@@ -62,7 +64,6 @@ def _save_embedding_npz(save_path, payload: dict):
             if len(v) == 0:
                 save_dict[k] = np.array([], dtype=object)
             else:
-                # 纯字符串/混合元信息统一用 object，更稳
                 if isinstance(v[0], str) or v[0] is None:
                     save_dict[k] = np.array(v, dtype=object)
                 else:
@@ -286,7 +287,6 @@ class WhitenNet(nn.Module):
                 y_pred_lst.extend(y_pred_np.tolist())
                 y_true_lst.extend(y_true_np.tolist())
 
-                # embeddings 缓存
                 feat_np = feature_vectors.detach().cpu().numpy()
                 logits_np = logits.detach().cpu().numpy()
 
@@ -327,7 +327,6 @@ class WhitenNet(nn.Module):
                         run_id_list.append(getattr(self.configs, "run_id", ""))
                         domain_split_list.append(split_name or "")
                 else:
-                    # 没有 meta 时也保证 embeddings 可导出
                     batch_n = len(y_pred_np)
                     sample_id_list.extend([None] * batch_n)
                     file_id_list.extend([None] * batch_n)
@@ -344,11 +343,9 @@ class WhitenNet(nn.Module):
             if out_csv and records:
                 write_lightweight_preds_csv(records, out_csv)
 
-            # 保存当前 loader 的 embeddings
             out_embed = export_embed_paths[i] if i < len(export_embed_paths) else None
             if out_embed is not None:
                 os.makedirs(os.path.dirname(out_embed), exist_ok=True)
-
                 payload = {
                     "features": np.concatenate(feat_list, axis=0) if len(feat_list) > 0 else np.empty((0, 0), dtype=np.float32),
                     "logits": np.concatenate(logits_list, axis=0) if len(logits_list) > 0 else np.empty((0, 0), dtype=np.float32),
@@ -364,7 +361,6 @@ class WhitenNet(nn.Module):
                 }
                 _save_embedding_npz(out_embed, payload)
 
-            # 汇总到 merged
             if len(feat_list) > 0:
                 merged_features.append(np.concatenate(feat_list, axis=0))
                 merged_logits.append(np.concatenate(logits_list, axis=0))
@@ -378,7 +374,6 @@ class WhitenNet(nn.Module):
                 merged_run_id.extend(run_id_list)
                 merged_domain_split.extend(domain_split_list)
 
-        # 保存 merged embeddings
         if export_embed_merged_path is not None:
             os.makedirs(os.path.dirname(export_embed_merged_path), exist_ok=True)
             merged_payload = {
@@ -484,7 +479,6 @@ def main():
     train_loaders_src, test_loaders_tgt, test_loaders_src, target_names, source_names = build_loaders_for_configs(configs)
     train_minibatches_iterator = zip(*train_loaders_src)
 
-    # 仅修改输出目录组织方式，不影响原模型训练/测试逻辑
     base_run_id = getattr(configs, "run_id", str(time.time())[:10])
     timestamp_tag = time.strftime("%Y%m%d_%H%M%S")
     run_id_effective = f"{base_run_id}__embed_{timestamp_tag}"
@@ -524,27 +518,45 @@ def main():
         gen_report.write_file(configs=configs, test_item=None, loss_acc_result=loss_acc_result)
         gen_report.save_file(currtime)
 
-    if bool(getattr(configs, "export_test_preds", True)):
+    export_test_preds = bool(getattr(configs, "export_test_preds", True))
+    export_test_embeddings = bool(getattr(configs, "export_test_embeddings", True))
+    export_train_embeddings = bool(getattr(configs, "export_train_embeddings", True))
+
+    # 1) 导出 source train embeddings（新增）
+    if export_train_embeddings:
+        train_embed_paths = [os.path.join(pred_dir, f"train_embeddings__{name}.npz") for name in source_names]
+        merged_train_embed_path = os.path.join(pred_dir, "train_embeddings.npz")
+        logger.info("Exporting source train embeddings ...")
+        model.test_model(
+            train_loaders_src,
+            export_pred_paths=[None] * len(train_loaders_src),
+            loader_names=source_names,
+            split_name="train_source",
+            export_embed_paths=train_embed_paths,
+            export_embed_merged_path=merged_train_embed_path,
+        )
+
+    # 2) 导出 target test preds（保留）+ test embeddings（已有）
+    if export_test_preds:
         target_pred_paths = [os.path.join(pred_dir, f"test_preds__{name}.csv") for name in target_names]
     else:
         target_pred_paths = [None] * len(target_names)
 
-    # 新增：target test embeddings 导出
-    export_test_embeddings = bool(getattr(configs, "export_test_embeddings", True))
     if export_test_embeddings:
         target_embed_paths = [os.path.join(pred_dir, f"test_embeddings__{name}.npz") for name in target_names]
-        merged_embed_path = os.path.join(pred_dir, "test_embeddings.npz")
+        merged_test_embed_path = os.path.join(pred_dir, "test_embeddings.npz")
     else:
         target_embed_paths = [None] * len(target_names)
-        merged_embed_path = None
+        merged_test_embed_path = None
 
+    logger.info("Exporting target test preds / embeddings ...")
     model.test_model(
         test_loaders_tgt,
         export_pred_paths=target_pred_paths,
         loader_names=target_names,
         split_name="target",
         export_embed_paths=target_embed_paths,
-        export_embed_merged_path=merged_embed_path,
+        export_embed_merged_path=merged_test_embed_path,
     )
 
     logger.info("Run finished.")
@@ -553,3 +565,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+python WhiteningNet_uored.py   --config /root/py/multidiag_remote/DGFDBenchmark_uored/config_files/WhiteningNet_uored_config_b001.yaml
+"""
