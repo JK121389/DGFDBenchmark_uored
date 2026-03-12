@@ -2,18 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-compare_margin_geometry.py
+compare_margin_geometry_trainproto.py
 
 用途：
-对比 WhiteningNet 与 concat_b2 在关键工况上的几何状态：
-- d_true: 到真类原型距离
-- d_wrong_min: 到最近错类原型距离
+对比 WhiteningNet 与 concat_b2 在统一 train-prototype 口径下的关键工况几何状态：
+- d_true: 到真类训练原型距离
+- d_wrong_min: 到最近错类训练原型距离
 - margin = d_wrong_min - d_true
 
 核心目标：
 1. 判断 WhiteningNet 修复 S1725 是否写在表示几何里
-2. 判断 WhiteningNet 毁坏 S1948 是否表现为几何翻转
-3. 为后续第五章“更轻、更稳的类条件稳定机制”提供前置依据
+2. 判断 WhiteningNet 毁坏 S1948 是否表现为相对训练语义中心的几何翻转
+3. 为后续第五章“更轻、更稳的类条件稳定机制”提供正式前置依据
 
 输入：
 A. concat_b2
@@ -21,19 +21,21 @@ A. concat_b2
    - test_embeddings.npz
 
 B. WhiteningNet
+   - train_embeddings.npz
    - test_embeddings.npz
-   （由于当前没有 train embeddings，默认用 test 全集按类均值构造近似原型）
 
 输出：
 - sample_margin_compare.csv
 - condition_margin_summary.csv
 - key_condition_margin_compare.csv
 - key_condition_margin_compare.txt
+- condition_margin_pivot_mean.csv
+- condition_positive_ratio_pivot.csv
 
 说明：
 - concat_b2 默认优先读取字段 z / y / condition_id，若不存在会尝试 features / y_true
 - WhiteningNet 默认读取 features / y_true / condition_id
-- 只做分析，不修改原始结果文件
+- 原型统一由 train embeddings 按类均值构造
 """
 
 import argparse
@@ -124,7 +126,6 @@ def compute_margin_table(
     - margin
     """
     dist_mat = l2_distance_matrix(features, proto_vectors)
-
     class_to_idx = {int(c): i for i, c in enumerate(proto_class_ids.tolist())}
 
     rows = []
@@ -167,14 +168,6 @@ def compute_margin_table(
 
 
 def summarize_condition_margins(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    每个 method x condition 汇总：
-    - n_samples
-    - margin_mean / median
-    - positive_margin_ratio
-    - d_true_mean
-    - d_wrong_min_mean
-    """
     grouped = df.groupby(["method", "condition_id"], as_index=False).agg(
         n_samples=("margin", "size"),
         margin_mean=("margin", "mean"),
@@ -188,66 +181,37 @@ def summarize_condition_margins(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================
-# 读取 concat_b2
+# 通用 embeddings 读取
 # =========================
 
-def load_concat_b2_train_prototypes(train_npz_path: Path) -> Tuple[np.ndarray, np.ndarray]:
-    d = load_npz(train_npz_path)
+def load_features_labels_conditions(npz_path: Path, method_name: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    d = load_npz(npz_path)
 
-    feat_key = find_first_key(d, ["z", "features"])
-    y_key = find_first_key(d, ["y", "y_true", "label"])
+    if method_name == "concat_b2":
+        feat_key = find_first_key(d, ["z", "features"])
+        y_key = find_first_key(d, ["y", "y_true", "label"])
+        cond_key = find_first_key(d, ["condition_id", "condition", "cond"])
+    elif method_name == "WhiteningNet":
+        feat_key = find_first_key(d, ["features", "z"])
+        y_key = find_first_key(d, ["y_true", "y", "label"])
+        cond_key = find_first_key(d, ["condition_id", "condition", "cond", "loader_name"])
+    else:
+        raise ValueError(f"未知 method_name: {method_name}")
+
     if feat_key is None or y_key is None:
         raise ValueError(
-            f"[concat_b2 train] 未找到特征或标签字段。现有字段：{list(d.keys())}"
+            f"[{method_name}] 未找到特征或标签字段。现有字段：{list(d.keys())}"
         )
 
     feats = np.asarray(d[feat_key])
     labels = normalize_int_array(d[y_key])
 
-    return build_class_prototypes(feats, labels)
-
-
-def load_concat_b2_test_table(test_npz_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    d = load_npz(test_npz_path)
-
-    feat_key = find_first_key(d, ["z", "features"])
-    y_key = find_first_key(d, ["y", "y_true", "label"])
-    cond_key = find_first_key(d, ["condition_id", "condition", "cond"])
-
-    if feat_key is None or y_key is None or cond_key is None:
-        raise ValueError(
-            f"[concat_b2 test] 未找到特征/标签/condition_id 字段。现有字段：{list(d.keys())}"
-        )
-
-    feats = np.asarray(d[feat_key])
-    labels = normalize_int_array(d[y_key])
-    conds = normalize_str_array(d[cond_key])
+    if cond_key is not None:
+        conds = normalize_str_array(d[cond_key])
+    else:
+        conds = np.array(["unknown"] * len(labels), dtype=str)
 
     return feats, labels, conds
-
-
-# =========================
-# 读取 WhiteningNet
-# =========================
-
-def load_whitening_test_table_and_prototypes(test_npz_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    d = load_npz(test_npz_path)
-
-    feat_key = find_first_key(d, ["features", "z"])
-    y_key = find_first_key(d, ["y_true", "y", "label"])
-    cond_key = find_first_key(d, ["condition_id", "condition", "cond", "loader_name"])
-
-    if feat_key is None or y_key is None or cond_key is None:
-        raise ValueError(
-            f"[WhiteningNet test] 未找到特征/标签/condition_id 字段。现有字段：{list(d.keys())}"
-        )
-
-    feats = np.asarray(d[feat_key])
-    labels = normalize_int_array(d[y_key])
-    conds = normalize_str_array(d[cond_key])
-
-    class_ids, protos = build_class_prototypes(feats, labels)
-    return feats, labels, conds, class_ids, protos
 
 
 # =========================
@@ -255,11 +219,13 @@ def load_whitening_test_table_and_prototypes(test_npz_path: Path) -> Tuple[np.nd
 # =========================
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Compare WhiteningNet vs concat_b2 margin geometry")
+    parser = argparse.ArgumentParser(description="Compare WhiteningNet vs concat_b2 margin geometry with train prototypes")
     parser.add_argument("--concat-train", type=str, required=True,
                         help="concat_b2 train_embeddings.npz")
     parser.add_argument("--concat-test", type=str, required=True,
                         help="concat_b2 test_embeddings.npz")
+    parser.add_argument("--whitening-train", type=str, required=True,
+                        help="WhiteningNet train_embeddings.npz")
     parser.add_argument("--whitening-test", type=str, required=True,
                         help="WhiteningNet test_embeddings.npz")
     parser.add_argument("--outdir", type=str, required=True,
@@ -277,9 +243,15 @@ def main():
 
     key_conditions = args.key_conditions
 
-    # concat_b2
-    concat_proto_class_ids, concat_protos = load_concat_b2_train_prototypes(Path(args.concat_train))
-    concat_test_feats, concat_test_labels, concat_test_conds = load_concat_b2_test_table(Path(args.concat_test))
+    # ========= concat_b2 =========
+    concat_train_feats, concat_train_labels, _ = load_features_labels_conditions(
+        Path(args.concat_train), method_name="concat_b2"
+    )
+    concat_test_feats, concat_test_labels, concat_test_conds = load_features_labels_conditions(
+        Path(args.concat_test), method_name="concat_b2"
+    )
+    concat_proto_class_ids, concat_protos = build_class_prototypes(concat_train_feats, concat_train_labels)
+
     df_concat = compute_margin_table(
         method="concat_b2",
         features=concat_test_feats,
@@ -289,9 +261,15 @@ def main():
         proto_vectors=concat_protos,
     )
 
-    # WhiteningNet
-    white_test_feats, white_test_labels, white_test_conds, white_proto_class_ids, white_protos = \
-        load_whitening_test_table_and_prototypes(Path(args.whitening_test))
+    # ========= WhiteningNet =========
+    white_train_feats, white_train_labels, _ = load_features_labels_conditions(
+        Path(args.whitening_train), method_name="WhiteningNet"
+    )
+    white_test_feats, white_test_labels, white_test_conds = load_features_labels_conditions(
+        Path(args.whitening_test), method_name="WhiteningNet"
+    )
+    white_proto_class_ids, white_protos = build_class_prototypes(white_train_feats, white_train_labels)
+
     df_white = compute_margin_table(
         method="WhiteningNet",
         features=white_test_feats,
@@ -308,14 +286,20 @@ def main():
     df_key = df_summary[df_summary["condition_id"].isin(key_conditions)].copy()
     df_key = df_key.sort_values(["condition_id", "method"]).reset_index(drop=True)
 
-    # 输出
+    # pivots
+    pivot_margin = df_summary.pivot(index="condition_id", columns="method", values="margin_mean").sort_index()
+    pivot_pos = df_summary.pivot(index="condition_id", columns="method", values="positive_margin_ratio").sort_index()
+
+    # save
     df_all.to_csv(outdir / "sample_margin_compare.csv", index=False, encoding="utf-8-sig")
     df_summary.to_csv(outdir / "condition_margin_summary.csv", index=False, encoding="utf-8-sig")
     df_key.to_csv(outdir / "key_condition_margin_compare.csv", index=False, encoding="utf-8-sig")
+    pivot_margin.to_csv(outdir / "condition_margin_pivot_mean.csv", encoding="utf-8-sig")
+    pivot_pos.to_csv(outdir / "condition_positive_ratio_pivot.csv", encoding="utf-8-sig")
 
     with open(outdir / "key_condition_margin_compare.txt", "w", encoding="utf-8") as f:
-        f.write("Key Condition Margin Compare\n")
-        f.write("=" * 120 + "\n\n")
+        f.write("Key Condition Margin Compare (Train Prototype)\n")
+        f.write("=" * 140 + "\n\n")
         if len(df_key) == 0:
             f.write("No matched key conditions found.\n")
         else:
@@ -324,12 +308,12 @@ def main():
 
     # terminal
     pd.set_option("display.max_columns", 50)
-    pd.set_option("display.width", 200)
+    pd.set_option("display.width", 220)
 
-    print("\n================ Condition Margin Summary ================\n")
+    print("\n================ Condition Margin Summary (Train Prototype) ================\n")
     print(df_summary.sort_values(["condition_id", "method"]).to_string(index=False))
 
-    print("\n================ Key Condition Margin Compare ================\n")
+    print("\n================ Key Condition Margin Compare (Train Prototype) ================\n")
     if len(df_key) == 0:
         print("未匹配到关键工况。")
     else:
@@ -340,18 +324,20 @@ def main():
     print(f"  - {outdir / 'condition_margin_summary.csv'}")
     print(f"  - {outdir / 'key_condition_margin_compare.csv'}")
     print(f"  - {outdir / 'key_condition_margin_compare.txt'}")
+    print(f"  - {outdir / 'condition_margin_pivot_mean.csv'}")
+    print(f"  - {outdir / 'condition_positive_ratio_pivot.csv'}")
 
 
 if __name__ == "__main__":
     main()
 
-
 """
-python /root/py/multidiag_remote/DGFDBenchmark_uored/analysis/compare_margin_geometry.py \
+python /root/py/multidiag_remote/DGFDBenchmark_uored/analysis/compare_margin_geometry_trainproto.py \
   --concat-train /root/py/multidiag_remote/multidiag/outputs/2026-03-10/exp_align_supcon_proto_vce_concat_b2/run_001/artifacts/train_embeddings.npz \
   --concat-test /root/py/multidiag_remote/multidiag/outputs/2026-03-10/exp_align_supcon_proto_vce_concat_b2/run_001/artifacts/test_embeddings.npz \
-  --whitening-test /root/py/multidiag_remote/DGFDBenchmark_uored/Output/WhiteningNet_UORED/whiteningnet_uored_b001_allsrc_alltgt__embed_20260312_160749/artifacts/test_embeddings.npz \
-  --outdir /root/py/multidiag_remote/analysis_outputs/compare_margin_geometry
-
-/root/py/multidiag_remote/analysis_outputs/compare_margin_geometry/key_condition_margin_compare.csv
+  --whitening-train /root/py/multidiag_remote/DGFDBenchmark_uored/Output/WhiteningNet_UORED/whiteningnet_uored_b001_allsrc_alltgt__embed_20260312_170648/artifacts/train_embeddings.npz \
+  --whitening-test /root/py/multidiag_remote/DGFDBenchmark_uored/Output/WhiteningNet_UORED/whiteningnet_uored_b001_allsrc_alltgt__embed_20260312_170648/artifacts/test_embeddings.npz \
+  --outdir /root/py/multidiag_remote/analysis_outputs/compare_margin_geometry_trainproto
+  
+  /root/py/multidiag_remote/analysis_outputs/compare_margin_geometry_trainproto/key_condition_margin_compare.csv
 """
