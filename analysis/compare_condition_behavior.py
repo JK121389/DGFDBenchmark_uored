@@ -332,14 +332,14 @@ def save_outputs(
     df_key = df_all_sorted[df_all_sorted["condition_id"].isin(key_conditions)].copy()
     df_key.to_csv(key_csv, index=False, encoding="utf-8-sig")
 
-    # 同时生成一个 markdown 预览，便于快速看
-    preview_md = outdir / "key_condition_compare.md"
-    with open(preview_md, "w", encoding="utf-8") as f:
-        f.write("# Key Condition Compare\n\n")
+    preview_txt = outdir / "key_condition_compare.txt"
+    with open(preview_txt, "w", encoding="utf-8") as f:
+        f.write("Key Condition Compare\n")
+        f.write("=" * 80 + "\n\n")
         if len(df_key) == 0:
             f.write("No matched key conditions found.\n")
         else:
-            f.write(df_key.to_markdown(index=False))
+            f.write(df_key.to_string(index=False))
             f.write("\n")
 
 
@@ -426,7 +426,7 @@ def main():
     print("\n输出完成：")
     print(f"  - {outdir / 'method_condition_behavior_summary.csv'}")
     print(f"  - {outdir / 'key_condition_compare.csv'}")
-    print(f"  - {outdir / 'key_condition_compare.md'}")
+    print(f"  - {outdir / 'key_condition_compare.txt'}")
 
 
 if __name__ == "__main__":
