@@ -365,3 +365,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+python /root/py/multidiag_remote/DGFDBenchmark_uored/analysis/compare_proto_vs_classifier.py   
+    --concat-train /root/py/multidiag_remote/multidiag/outputs/2026-03-10/exp_align_supcon_proto_vce_concat_b2/run_001/artifacts/train_embeddings.npz   
+    --concat-test /root/py/multidiag_remote/multidiag/outputs/2026-03-10/exp_align_supcon_proto_vce_concat_b2/run_001/artifacts/test_embeddings.npz   
+    --whitening-train /root/py/multidiag_remote/DGFDBenchmark_uored/Output/WhiteningNet_UORED/whiteningnet_uored_b001_allsrc_alltgt__embed_20260312_170648/artifacts/train_embeddings.npz   
+    --whitening-test /root/py/multidiag_remote/DGFDBenchmark_uored/Output/WhiteningNet_UORED/whiteningnet_uored_b001_allsrc_alltgt__embed_20260312_170648/artifacts/test_embeddings.npz   
+    --outdir /root/py/multidiag_remote/analysis_outputs/compare_proto_vs_classifier
+
+"""
