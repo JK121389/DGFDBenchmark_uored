@@ -69,10 +69,6 @@ def _save_embedding_npz(save_path, payload: dict):
 
 
 def _concat_payloads(payloads):
-    """
-    将多个同结构 payload 合并。
-    数值二维张量按 axis=0 拼接；一维标签/元信息按列表扩展。
-    """
     if len(payloads) == 0:
         return {}
 
@@ -88,10 +84,7 @@ def _concat_payloads(payloads):
 
         first = values[0]
         if isinstance(first, np.ndarray):
-            if first.dtype == object:
-                merged[k] = np.concatenate(values, axis=0)
-            else:
-                merged[k] = np.concatenate(values, axis=0)
+            merged[k] = np.concatenate(values, axis=0)
         elif isinstance(first, list):
             out = []
             for v in values:
@@ -254,12 +247,6 @@ class WhitenNet(nn.Module):
         split_name,
         export_pred_path=None,
     ):
-        """
-        单个 loader：
-        - 计算 acc
-        - 可选导出 preds csv
-        - 返回当前 loader 的完整 payload（仅当前 loader，便于立即落盘）
-        """
         self.eval()
 
         y_pred_lst = []
@@ -375,11 +362,6 @@ class WhitenNet(nn.Module):
         export_embed_merged_path=None,
         logger=None,
     ):
-        """
-        稳定版导出：
-        - 每个 loader 单独收集、单独落盘
-        - 最后再从各分文件合并 merged npz
-        """
         self.eval()
         acc_results = []
 
@@ -414,7 +396,6 @@ class WhitenNet(nn.Module):
                     n_samples = len(payload["y_true"]) if "y_true" in payload else 0
                     logger.info(f"[export] saved embeddings: {out_embed} | n_samples={n_samples}")
 
-            # 及时释放当前 loader 缓存
             del payload
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -563,13 +544,16 @@ def main():
     export_test_embeddings = bool(getattr(configs, "export_test_embeddings", True))
     export_train_embeddings = bool(getattr(configs, "export_train_embeddings", True))
 
+    # 关键修正：
+    # train embeddings 导出使用 test_loaders_src（有限、non-shuffle、drop_last=False）
+    # 而不是 train_loaders_src（InfiniteLoader）
     if export_train_embeddings:
         train_embed_paths = [os.path.join(pred_dir, f"train_embeddings__{name}.npz") for name in source_names]
         merged_train_embed_path = os.path.join(pred_dir, "train_embeddings.npz")
         logger.info("Exporting source train embeddings ...")
         model.test_model(
-            train_loaders_src,
-            export_pred_paths=[None] * len(train_loaders_src),
+            test_loaders_src,
+            export_pred_paths=[None] * len(test_loaders_src),
             loader_names=source_names,
             split_name="train_source",
             export_embed_paths=train_embed_paths,
@@ -606,8 +590,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-"""
-python WhiteningNet_uored.py   --config /root/py/multidiag_remote/DGFDBenchmark_uored/config_files/WhiteningNet_uored_config_b001.yaml
-"""
