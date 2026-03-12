@@ -51,11 +51,6 @@ def _safe_to_numpy(x):
 
 
 def _save_embedding_npz(save_path, payload: dict):
-    """
-    统一保存 npz。
-    数值字段转 numpy array；
-    字符串/元信息字段转 object array，兼容性更稳。
-    """
     save_dict = {}
     for k, v in payload.items():
         if v is None:
@@ -73,10 +68,46 @@ def _save_embedding_npz(save_path, payload: dict):
     np.savez_compressed(save_path, **save_dict)
 
 
+def _concat_payloads(payloads):
+    """
+    将多个同结构 payload 合并。
+    数值二维张量按 axis=0 拼接；一维标签/元信息按列表扩展。
+    """
+    if len(payloads) == 0:
+        return {}
+
+    keys = set()
+    for p in payloads:
+        keys.update(p.keys())
+
+    merged = {}
+    for k in keys:
+        values = [p[k] for p in payloads if k in p and p[k] is not None]
+        if len(values) == 0:
+            continue
+
+        first = values[0]
+        if isinstance(first, np.ndarray):
+            if first.dtype == object:
+                merged[k] = np.concatenate(values, axis=0)
+            else:
+                merged[k] = np.concatenate(values, axis=0)
+        elif isinstance(first, list):
+            out = []
+            for v in values:
+                out.extend(v)
+            merged[k] = out
+        else:
+            merged[k] = np.asarray(values)
+    return merged
+
+
+def _load_npz_payload(npz_path):
+    d = np.load(npz_path, allow_pickle=True)
+    return {k: d[k] for k in d.files}
+
+
 class CausalLoss(nn.Module):
-    """
-    Consistent with original WhiteningNet implementation.
-    """
     def __init__(self, configs):
         super().__init__()
         self.num_classes = configs.num_classes
@@ -216,6 +247,124 @@ class WhitenNet(nn.Module):
 
         return loss_acc_result
 
+    def _collect_loader_payload(
+        self,
+        the_loader,
+        loader_name,
+        split_name,
+        export_pred_path=None,
+    ):
+        """
+        单个 loader：
+        - 计算 acc
+        - 可选导出 preds csv
+        - 返回当前 loader 的完整 payload（仅当前 loader，便于立即落盘）
+        """
+        self.eval()
+
+        y_pred_lst = []
+        y_true_lst = []
+        records = []
+
+        feat_list = []
+        logits_list = []
+        yt_list = []
+        yp_list = []
+        sample_id_list = []
+        file_id_list = []
+        condition_id_list = []
+        loader_name_list = []
+        method_list = []
+        run_id_list = []
+        domain_split_list = []
+
+        for batched_data in the_loader:
+            if isinstance(batched_data, (list, tuple)) and len(batched_data) == 3:
+                x, label_fault, meta = batched_data
+            else:
+                x, label_fault = batched_data
+                meta = None
+
+            x = x.to(self.device)
+            label_fault = label_fault.to(self.device)
+
+            with torch.no_grad():
+                feature_vectors, logits = self.model(x)
+                label_pred = torch.max(logits, dim=1)[1]
+
+            y_pred_np = label_pred.detach().cpu().numpy()
+            y_true_np = label_fault.detach().cpu().numpy()
+
+            y_pred_lst.extend(y_pred_np.tolist())
+            y_true_lst.extend(y_true_np.tolist())
+
+            feat_list.append(feature_vectors.detach().cpu().numpy())
+            logits_list.append(logits.detach().cpu().numpy())
+            yt_list.extend(y_true_np.tolist())
+            yp_list.extend(y_pred_np.tolist())
+
+            if meta is not None:
+                meta_records = collect_batch_meta(meta)
+                if len(meta_records) != len(y_pred_np):
+                    raise RuntimeError(f"Meta batch length mismatch: {len(meta_records)} vs {len(y_pred_np)}")
+
+                for meta_i, yt, yp in zip(meta_records, y_true_np.tolist(), y_pred_np.tolist()):
+                    sample_id = meta_i.get("sample_id")
+                    file_id = meta_i.get("file_id")
+                    condition_id = meta_i.get("condition_id")
+
+                    records.append(
+                        {
+                            "sample_id": sample_id,
+                            "file_id": file_id,
+                            "condition_id": condition_id,
+                            "y_true": int(yt),
+                            "y_pred": int(yp),
+                            "method": "WhiteningNet",
+                            "run_id": getattr(self.configs, "run_id", ""),
+                            "domain_split": split_name or "",
+                            "loader_name": loader_name,
+                        }
+                    )
+
+                    sample_id_list.append(sample_id)
+                    file_id_list.append(file_id)
+                    condition_id_list.append(condition_id)
+                    loader_name_list.append(loader_name)
+                    method_list.append("WhiteningNet")
+                    run_id_list.append(getattr(self.configs, "run_id", ""))
+                    domain_split_list.append(split_name or "")
+            else:
+                batch_n = len(y_pred_np)
+                sample_id_list.extend([None] * batch_n)
+                file_id_list.extend([None] * batch_n)
+                condition_id_list.extend([loader_name] * batch_n)
+                loader_name_list.extend([loader_name] * batch_n)
+                method_list.extend(["WhiteningNet"] * batch_n)
+                run_id_list.extend([getattr(self.configs, "run_id", "")] * batch_n)
+                domain_split_list.extend([split_name or ""] * batch_n)
+
+        acc_i, _, _, _ = cal_index(y_true_lst, y_pred_lst)
+
+        if export_pred_path and records:
+            os.makedirs(os.path.dirname(export_pred_path), exist_ok=True)
+            write_lightweight_preds_csv(records, export_pred_path)
+
+        payload = {
+            "features": np.concatenate(feat_list, axis=0) if len(feat_list) > 0 else np.empty((0, 0), dtype=np.float32),
+            "logits": np.concatenate(logits_list, axis=0) if len(logits_list) > 0 else np.empty((0, 0), dtype=np.float32),
+            "y_true": np.asarray(yt_list, dtype=np.int64),
+            "y_pred": np.asarray(yp_list, dtype=np.int64),
+            "sample_id": sample_id_list,
+            "file_id": file_id_list,
+            "condition_id": condition_id_list,
+            "loader_name": loader_name_list,
+            "method": method_list,
+            "run_id": run_id_list,
+            "domain_split": domain_split_list,
+        }
+        return acc_i, payload
+
     def test_model(
         self,
         loaders,
@@ -224,11 +373,12 @@ class WhitenNet(nn.Module):
         split_name=None,
         export_embed_paths=None,
         export_embed_merged_path=None,
+        logger=None,
     ):
         """
-        保持原有测试/预测逻辑不变，只新增可选 embeddings 导出：
-        - export_embed_paths: 每个 loader 一个 npz
-        - export_embed_merged_path: 所有 loader 合并一个 npz
+        稳定版导出：
+        - 每个 loader 单独收集、单独落盘
+        - 最后再从各分文件合并 merged npz
         """
         self.eval()
         acc_results = []
@@ -237,159 +387,50 @@ class WhitenNet(nn.Module):
         export_embed_paths = export_embed_paths or [None] * len(loaders)
         loader_names = loader_names or [f"loader_{i}" for i in range(len(loaders))]
 
-        merged_features = []
-        merged_logits = []
-        merged_y_true = []
-        merged_y_pred = []
-        merged_sample_id = []
-        merged_file_id = []
-        merged_condition_id = []
-        merged_loader_name = []
-        merged_method = []
-        merged_run_id = []
-        merged_domain_split = []
+        produced_embed_files = []
 
         for i, the_loader in enumerate(loaders):
-            y_pred_lst = []
-            y_true_lst = []
-            records = []
+            loader_name = loader_names[i]
+            out_csv = export_pred_paths[i] if i < len(export_pred_paths) else None
+            out_embed = export_embed_paths[i] if i < len(export_embed_paths) else None
 
-            # per-loader embeddings cache
-            feat_list = []
-            logits_list = []
-            yt_list = []
-            yp_list = []
-            sample_id_list = []
-            file_id_list = []
-            condition_id_list = []
-            loader_name_list = []
-            method_list = []
-            run_id_list = []
-            domain_split_list = []
+            if logger is not None:
+                logger.info(f"[export] start loader={loader_name} split={split_name or ''}")
 
-            for batched_data in the_loader:
-                if isinstance(batched_data, (list, tuple)) and len(batched_data) == 3:
-                    x, label_fault, meta = batched_data
-                else:
-                    x, label_fault = batched_data
-                    meta = None
-
-                x = x.to(self.device)
-                label_fault = label_fault.to(self.device)
-
-                with torch.no_grad():
-                    feature_vectors, logits = self.model(x)
-                    label_pred = torch.max(logits, dim=1)[1]
-
-                y_pred_np = label_pred.detach().cpu().numpy()
-                y_true_np = label_fault.detach().cpu().numpy()
-
-                y_pred_lst.extend(y_pred_np.tolist())
-                y_true_lst.extend(y_true_np.tolist())
-
-                feat_np = feature_vectors.detach().cpu().numpy()
-                logits_np = logits.detach().cpu().numpy()
-
-                feat_list.append(feat_np)
-                logits_list.append(logits_np)
-                yt_list.extend(y_true_np.tolist())
-                yp_list.extend(y_pred_np.tolist())
-
-                if meta is not None:
-                    meta_records = collect_batch_meta(meta)
-                    if len(meta_records) != len(y_pred_np):
-                        raise RuntimeError(f"Meta batch length mismatch: {len(meta_records)} vs {len(y_pred_np)}")
-
-                    for meta_i, yt, yp in zip(meta_records, y_true_np.tolist(), y_pred_np.tolist()):
-                        sample_id = meta_i.get("sample_id")
-                        file_id = meta_i.get("file_id")
-                        condition_id = meta_i.get("condition_id")
-
-                        records.append(
-                            {
-                                "sample_id": sample_id,
-                                "file_id": file_id,
-                                "condition_id": condition_id,
-                                "y_true": int(yt),
-                                "y_pred": int(yp),
-                                "method": "WhiteningNet",
-                                "run_id": getattr(self.configs, "run_id", ""),
-                                "domain_split": split_name or "",
-                                "loader_name": loader_names[i],
-                            }
-                        )
-
-                        sample_id_list.append(sample_id)
-                        file_id_list.append(file_id)
-                        condition_id_list.append(condition_id)
-                        loader_name_list.append(loader_names[i])
-                        method_list.append("WhiteningNet")
-                        run_id_list.append(getattr(self.configs, "run_id", ""))
-                        domain_split_list.append(split_name or "")
-                else:
-                    batch_n = len(y_pred_np)
-                    sample_id_list.extend([None] * batch_n)
-                    file_id_list.extend([None] * batch_n)
-                    condition_id_list.extend([loader_names[i]] * batch_n)
-                    loader_name_list.extend([loader_names[i]] * batch_n)
-                    method_list.extend(["WhiteningNet"] * batch_n)
-                    run_id_list.extend([getattr(self.configs, "run_id", "")] * batch_n)
-                    domain_split_list.extend([split_name or ""] * batch_n)
-
-            acc_i, _, _, _ = cal_index(y_true_lst, y_pred_lst)
+            acc_i, payload = self._collect_loader_payload(
+                the_loader=the_loader,
+                loader_name=loader_name,
+                split_name=split_name,
+                export_pred_path=out_csv,
+            )
             acc_results.append(acc_i)
 
-            out_csv = export_pred_paths[i] if i < len(export_pred_paths) else None
-            if out_csv and records:
-                write_lightweight_preds_csv(records, out_csv)
-
-            out_embed = export_embed_paths[i] if i < len(export_embed_paths) else None
             if out_embed is not None:
                 os.makedirs(os.path.dirname(out_embed), exist_ok=True)
-                payload = {
-                    "features": np.concatenate(feat_list, axis=0) if len(feat_list) > 0 else np.empty((0, 0), dtype=np.float32),
-                    "logits": np.concatenate(logits_list, axis=0) if len(logits_list) > 0 else np.empty((0, 0), dtype=np.float32),
-                    "y_true": np.asarray(yt_list, dtype=np.int64),
-                    "y_pred": np.asarray(yp_list, dtype=np.int64),
-                    "sample_id": sample_id_list,
-                    "file_id": file_id_list,
-                    "condition_id": condition_id_list,
-                    "loader_name": loader_name_list,
-                    "method": method_list,
-                    "run_id": run_id_list,
-                    "domain_split": domain_split_list,
-                }
                 _save_embedding_npz(out_embed, payload)
+                produced_embed_files.append(out_embed)
 
-            if len(feat_list) > 0:
-                merged_features.append(np.concatenate(feat_list, axis=0))
-                merged_logits.append(np.concatenate(logits_list, axis=0))
-                merged_y_true.extend(yt_list)
-                merged_y_pred.extend(yp_list)
-                merged_sample_id.extend(sample_id_list)
-                merged_file_id.extend(file_id_list)
-                merged_condition_id.extend(condition_id_list)
-                merged_loader_name.extend(loader_name_list)
-                merged_method.extend(method_list)
-                merged_run_id.extend(run_id_list)
-                merged_domain_split.extend(domain_split_list)
+                if logger is not None:
+                    n_samples = len(payload["y_true"]) if "y_true" in payload else 0
+                    logger.info(f"[export] saved embeddings: {out_embed} | n_samples={n_samples}")
 
-        if export_embed_merged_path is not None:
+            # 及时释放当前 loader 缓存
+            del payload
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        if export_embed_merged_path is not None and len(produced_embed_files) > 0:
+            if logger is not None:
+                logger.info(f"[export] merging {len(produced_embed_files)} embedding files -> {export_embed_merged_path}")
+
+            payloads = [_load_npz_payload(p) for p in produced_embed_files]
+            merged_payload = _concat_payloads(payloads)
             os.makedirs(os.path.dirname(export_embed_merged_path), exist_ok=True)
-            merged_payload = {
-                "features": np.concatenate(merged_features, axis=0) if len(merged_features) > 0 else np.empty((0, 0), dtype=np.float32),
-                "logits": np.concatenate(merged_logits, axis=0) if len(merged_logits) > 0 else np.empty((0, 0), dtype=np.float32),
-                "y_true": np.asarray(merged_y_true, dtype=np.int64),
-                "y_pred": np.asarray(merged_y_pred, dtype=np.int64),
-                "sample_id": merged_sample_id,
-                "file_id": merged_file_id,
-                "condition_id": merged_condition_id,
-                "loader_name": merged_loader_name,
-                "method": merged_method,
-                "run_id": merged_run_id,
-                "domain_split": merged_domain_split,
-            }
             _save_embedding_npz(export_embed_merged_path, merged_payload)
+
+            if logger is not None:
+                n_samples = len(merged_payload["y_true"]) if "y_true" in merged_payload else 0
+                logger.info(f"[export] saved merged embeddings: {export_embed_merged_path} | n_samples={n_samples}")
 
         self.train()
         return acc_results
@@ -522,7 +563,6 @@ def main():
     export_test_embeddings = bool(getattr(configs, "export_test_embeddings", True))
     export_train_embeddings = bool(getattr(configs, "export_train_embeddings", True))
 
-    # 1) 导出 source train embeddings（新增）
     if export_train_embeddings:
         train_embed_paths = [os.path.join(pred_dir, f"train_embeddings__{name}.npz") for name in source_names]
         merged_train_embed_path = os.path.join(pred_dir, "train_embeddings.npz")
@@ -534,9 +574,9 @@ def main():
             split_name="train_source",
             export_embed_paths=train_embed_paths,
             export_embed_merged_path=merged_train_embed_path,
+            logger=logger,
         )
 
-    # 2) 导出 target test preds（保留）+ test embeddings（已有）
     if export_test_preds:
         target_pred_paths = [os.path.join(pred_dir, f"test_preds__{name}.csv") for name in target_names]
     else:
@@ -557,6 +597,7 @@ def main():
         split_name="target",
         export_embed_paths=target_embed_paths,
         export_embed_merged_path=merged_test_embed_path,
+        logger=logger,
     )
 
     logger.info("Run finished.")
@@ -565,6 +606,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 """
 python WhiteningNet_uored.py   --config /root/py/multidiag_remote/DGFDBenchmark_uored/config_files/WhiteningNet_uored_config_b001.yaml
